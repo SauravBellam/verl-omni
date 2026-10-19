@@ -25,9 +25,10 @@ from verl_omni.workers.config import DiffusionModelConfig
 __all__ = ["StableDiffusion3DGPO"]
 
 
+@DiffusionModelBase.register("StableDiffusion3Pipeline", algorithm="awm")
 @DiffusionModelBase.register("StableDiffusion3Pipeline", algorithm="dgpo")
 class StableDiffusion3DGPO(StableDiffusion3DPO):
-    """Forward-process SD3 adapter used by DGPO.
+    """Forward-process SD3 adapter used by DGPO and AWM.
 
     Inputs are built exactly as for Diffusion-DPO (noised latents at a sampled timestep).
     DGPO scores the conditional velocity, so the forward pass never applies CFG; the
