@@ -61,7 +61,19 @@ batch sizes in the script are kept equal to the DGPO recipe for a side-by-side.
 
 ## Tested configuration
 
-GPU validation is pending (see the tracking issue
-[#763](https://github.com/verl-project/verl-omni/issues/763)); the loss, batch
-preparation and config validation are covered by
-`tests/trainer/diffusion/test_awm_loss_on_cpu.py`.
+- 1x NVIDIA L4 24GB (GCP g2-standard-16, 62GB RAM), driver 615.71, Linux, BF16
+- Python 3.12, torch 2.13.0+cu132, vllm 0.30.0, vllm-omni 0.30.1.dev29+g12e928001,
+  diffusers 0.40.0, transformers 5.14.1
+- Everything on the one GPU: `NUM_GPUS_ACTOR_ROLLOUT=1`, the reward model
+  colocated (`reward.reward_model.enable_resource_pool=False`,
+  `reward.models.ocr.offload=True`, served in fp8 via
+  `reward.models.ocr.rollout.engine_kwargs.vllm.quantization=fp8` at
+  `gpu_memory_utilization=0.4`), actor `fsdp_config.param_offload=True`, rollout
+  `engine_kwargs.vllm_omni.max_num_seqs=8`, attention `native` / `TORCH_SDPA`
+- A 20-step run of `sd35/run_sd35_medium_ocr_lora_v1.sh` in this setup, validating
+  on 64 test prompts at steps 0, 10 and 20, took 180 s per training step (rollout
+  81 s, reward 9 s, actor update 84 s); the OCR validation reward went from 0.683
+  at step 0 to 0.713 at step 10 and 0.799 at step 20, with the training-batch
+  reward rising from 0.55 to 0.87
+
+![AWM reward curve on one L4](sd35/reward_curve.png)
