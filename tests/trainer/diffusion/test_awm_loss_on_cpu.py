@@ -72,8 +72,11 @@ def reference_awm_loss(inputs, advantages, clip_range, awm_kl_coef, ref_kl_coef,
     terms = []
     for i in range(len(dsm)):
         ratio = torch.exp(old_dsm[i] - dsm[i])  # exp(log p - log p_old) with log p = -dsm
-        clipped = torch.clamp(ratio, 1 - clip_range, 1 + clip_range)
-        terms.append(torch.maximum(-advantages[i] * ratio, -advantages[i] * clipped))
+        if clip_range > 0:
+            clipped = torch.clamp(ratio, 1 - clip_range, 1 + clip_range)
+            terms.append(torch.maximum(-advantages[i] * ratio, -advantages[i] * clipped))
+        else:
+            terms.append(-advantages[i] * ratio)
     policy = torch.stack(terms).mean()
     ema_kl = ((inputs["forward_prediction"] - inputs["old_prediction"]) ** 2).mean()
     ref_kl = ((inputs["forward_prediction"] - inputs["ref_forward_prediction"]) ** 2).mean()
@@ -136,6 +139,23 @@ def test_awm_clip_removes_the_policy_gradient_outside_the_trust_region():
     assert result.metrics["actor/clip_frac"] == pytest.approx(0.5)
     assert torch.count_nonzero(grad[0]) == 0
     assert torch.count_nonzero(grad[1]) > 0
+
+
+def test_awm_zero_clip_range_disables_clipping():
+    """`awm_clip_range=0` keeps the plain ratio surrogate: favourable moves still get a gradient."""
+    inputs = make_inputs(2)
+    target = inputs["target"]
+    # Both samples moved favourably past any clip bound: dsm = [0.01, 0.25] vs old_dsm = [0.25, 0.01], so the
+    # ratio is exp(0.24) where A > 0 and exp(-0.24) where A < 0.
+    inputs["forward_prediction"] = torch.stack([target[0] + 0.1, target[1] + 0.5]).requires_grad_(True)
+    inputs["old_prediction"] = torch.stack([target[0] + 0.5, target[1] + 0.1])
+    result = run_loss(inputs, torch.tensor([1.0, -1.0]), awm_clip_range=0.0, awm_kl_coef=0.0, ref_kl_coef=0.0)
+    (grad,) = torch.autograd.grad(result.loss, inputs["forward_prediction"])
+    assert result.metrics["actor/clip_frac"] == 0.0
+    assert torch.count_nonzero(grad[0]) > 0
+    assert torch.count_nonzero(grad[1]) > 0
+    clipped = run_loss(inputs, torch.tensor([1.0, -1.0]), awm_clip_range=0.01, awm_kl_coef=0.0, ref_kl_coef=0.0)
+    assert clipped.metrics["actor/clip_frac"] == pytest.approx(1.0)
 
 
 def test_awm_ema_kl_is_zero_when_policy_matches_the_ema_adapter():
@@ -228,7 +248,7 @@ def make_trainer_config(**overrides):
             "actor_rollout_ref": {
                 "model": {"lora_rank": 32, "policy_state_adapters": ["default", "old"]},
                 "rollout": {"n": 8, "rollout_adapter": "old", "pipeline": {"num_inference_steps": 10}},
-                "actor": {"use_kl_loss": False},
+                "actor": {"use_kl_loss": False, "enable_timestep_staging": False},
             },
         }
     )
@@ -246,6 +266,7 @@ def make_trainer_config(**overrides):
         ({"actor_rollout_ref.model.policy_state_adapters": ["default"]}, 'must include "old"'),
         ({"actor_rollout_ref.rollout.rollout_adapter": "default"}, "rollout_adapter must be old"),
         ({"actor_rollout_ref.actor.use_kl_loss": True}, "use_kl_loss must be False"),
+        ({"actor_rollout_ref.actor.enable_timestep_staging": True}, "enable_timestep_staging must be False"),
         ({"algorithm.train_timestep_range": [0, 11]}, "0 <= start < end <= 10"),
         ({"algorithm.train_timestep_count": 11}, "train_timestep_count=11 must be between 1 and 10"),
     ],

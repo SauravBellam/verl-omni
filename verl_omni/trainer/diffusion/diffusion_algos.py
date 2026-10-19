@@ -1752,15 +1752,21 @@ class AWMLoss(DiffusionLossFn):
             old_dsm = ((target - old_prediction) ** 2).mean(dim=reduce_dims)
         ratio = torch.exp(old_dsm - dsm)
         clip_range = loss_cfg.awm_clip_range
-        clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)
-        policy_loss = torch.maximum(-advantages * ratio, -advantages * clipped_ratio).mean()
+        if clip_range > 0:
+            clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)
+            policy_loss = torch.maximum(-advantages * ratio, -advantages * clipped_ratio).mean()
+        else:
+            policy_loss = (-advantages * ratio).mean()
         ema_kl_loss = ((forward_prediction.float() - old_prediction) ** 2).mean()
         ref_kl_loss = ((forward_prediction.float() - ref_forward_prediction) ** 2).mean()
         loss = policy_loss + loss_cfg.awm_kl_coef * ema_kl_loss + loss_cfg.ref_kl_coef * ref_kl_loss
 
         with torch.no_grad():
             # Samples whose surrogate is the clipped constant, i.e. that receive no policy gradient.
-            should_clip = torch.where(advantages > 0, ratio > 1.0 + clip_range, ratio < 1.0 - clip_range)
+            if clip_range > 0:
+                should_clip = torch.where(advantages > 0, ratio > 1.0 + clip_range, ratio < 1.0 - clip_range)
+            else:
+                should_clip = torch.zeros_like(ratio, dtype=torch.bool)
             metrics = {
                 "actor/policy_loss": policy_loss.item(),
                 "actor/dsm_loss": dsm.mean().item(),
@@ -1794,8 +1800,14 @@ class AWMLoss(DiffusionLossFn):
 
     @staticmethod
     def validate_trainer_config(config: Any) -> None:
-        """Fail at trainer start without the LoRA ``old`` adapter or with a bad training-timestep window."""
-        problems = _old_adapter_config_problems(config) + _train_timestep_window_problems(config)
+        """Fail at trainer start without the LoRA ``old`` adapter, with timestep staging, or a bad timestep window.
+
+        The staged NFT engine path expects a per-step ``reward_prob`` tensor that AWM does not produce.
+        """
+        problems = _old_adapter_config_problems(config)
+        if config.actor_rollout_ref.actor.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        problems += _train_timestep_window_problems(config)
         if problems:
             raise ValueError("AWM config is not supported: " + "; ".join(problems) + ".")
 
