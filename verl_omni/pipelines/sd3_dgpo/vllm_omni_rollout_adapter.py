@@ -52,6 +52,7 @@ class StableDiffusion3DGPOPipeline(StableDiffusion3PipelineWithLogProb):
         generator: torch.Generator | list[torch.Generator] | None,
         logprobs: bool,
     ) -> tuple[torch.Tensor, None, None, torch.Tensor]:
+        """Run the deterministic Euler ODE and return the final clean latents with the timestep schedule."""
         del noise_level, sde_window, sde_type, logprobs
         # The parent stores fp32 latents for every step inside the window; a one-step window keeps that to two.
         latents, _, _, _ = super().diffuse(

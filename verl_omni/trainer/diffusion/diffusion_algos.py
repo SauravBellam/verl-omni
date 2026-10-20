@@ -1786,6 +1786,7 @@ class AWMLoss(DiffusionLossFn):
         model_output: dict[str, Any],
         data: TensorDict,
     ) -> DiffusionLossResult:
+        """Compute the AWM loss from the engine's model output and the per-step batch tensors."""
         loss, metrics = self.compute_loss(
             forward_prediction=model_output["forward_prediction"],
             old_prediction=model_output["old_prediction"],

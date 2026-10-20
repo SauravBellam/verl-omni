@@ -37,11 +37,13 @@ C, H, W = 4, 3, 3
 
 
 def make_actor(**loss_kwargs) -> DiffusionActorConfig:
+    """Build an actor config with the AWM loss and the given loss overrides."""
     loss_cfg = DiffusionLossConfig(loss_mode="awm", **loss_kwargs)
     return DiffusionActorConfig(strategy="fsdp2", rollout_n=1, diffusion_loss=loss_cfg)
 
 
 def make_inputs(batch, seed=0, t=0.6):
+    """Build a forward-process batch: clean latents, noised latents, target velocity and three predictions."""
     generator = torch.Generator().manual_seed(seed)
     x0 = torch.randn(batch, C, H, W, generator=generator)
     noise = torch.randn(batch, C, H, W, generator=generator)
@@ -50,6 +52,7 @@ def make_inputs(batch, seed=0, t=0.6):
     target = noise - x0
 
     def prediction(scale):
+        """Return the target velocity plus Gaussian noise of the given scale."""
         return target + scale * torch.randn(batch, C, H, W, generator=generator)
 
     return {
@@ -84,6 +87,7 @@ def reference_awm_loss(inputs, advantages, clip_range, awm_kl_coef, ref_kl_coef,
 
 
 def run_loss(inputs, advantages, **loss_kwargs):
+    """Run the registered AWM loss on the synthetic inputs and advantages."""
     model_output = {key: inputs[key] for key in AWMLoss.required_model_output_keys}
     data = TensorDict({"advantages": advantages}, batch_size=[len(advantages)])
     return get_diffusion_loss_fn("awm")(config=make_actor(**loss_kwargs), model_output=model_output, data=data)
@@ -92,6 +96,7 @@ def run_loss(inputs, advantages, **loss_kwargs):
 @pytest.mark.parametrize("clip_range", [0.0, 0.1, 1.0])
 @pytest.mark.parametrize("awm_kl_coef,ref_kl_coef", [(0.0, 0.0), (0.1, 0.02)])
 def test_awm_loss_and_gradient_match_the_formula(clip_range, awm_kl_coef, ref_kl_coef):
+    """The loss value and its gradient match the reference transcription for every clip and KL setting."""
     advantages = torch.tensor([1.2, -0.4, -0.8, 0.3, 0.9, -1.2])
     inputs = make_inputs(len(advantages))
 
@@ -128,6 +133,7 @@ def test_awm_advantage_sign_sets_the_gradient_direction():
 
 
 def test_awm_clip_removes_the_policy_gradient_outside_the_trust_region():
+    """A sample whose ratio left the trust region in the favourable direction contributes no policy gradient."""
     inputs = make_inputs(2)
     target = inputs["target"]
     inputs["forward_prediction"] = (target + 0.1).requires_grad_(True)  # dsm = 0.01
@@ -188,6 +194,7 @@ def test_awm_through_the_worker_loss_entry_point():
 
 
 def test_awm_config_validation():
+    """The loss config exposes the AWM defaults and rejects negative clip ranges and KL coefficients."""
     assert DiffusionLossConfig(loss_mode="awm").awm_clip_range == pytest.approx(1e-4)
     with pytest.raises(ValueError, match="awm_clip_range"):
         DiffusionLossConfig(loss_mode="awm", awm_clip_range=-0.1)
@@ -196,6 +203,7 @@ def test_awm_config_validation():
 
 
 def make_rollout_batch(uid, num_steps=10):
+    """Build a final-latent rollout batch with a shared timestep schedule and per-row uids."""
     batch_size = len(uid)
     schedule = torch.linspace(1000, 100, num_steps).round().long()
     return DataProto.from_dict(
@@ -208,6 +216,7 @@ def make_rollout_batch(uid, num_steps=10):
 
 
 def make_config(**algorithm_kwargs):
+    """Build a minimal trainer config namespace with the algorithm fields the batch preparation reads."""
     algorithm = SimpleNamespace(norm_adv_by_std_in_grpo=True, global_std=False, timestep_fraction=1.0)
     for key, value in algorithm_kwargs.items():
         setattr(algorithm, key, value)
@@ -215,6 +224,7 @@ def make_config(**algorithm_kwargs):
 
 
 def test_prepare_awm_actor_batch_uses_grpo_advantages_and_shared_timesteps():
+    """Batch preparation adds GRPO group advantages and batch-shared timesteps without group tensors."""
     uid = ["a", "b", "a", "b"]
     batch = make_rollout_batch(uid)
     rewards = torch.tensor([0.0, 0.5, 1.0, 0.5])
@@ -242,6 +252,7 @@ def test_prepare_awm_actor_batch_uses_grpo_advantages_and_shared_timesteps():
 
 
 def make_trainer_config(**overrides):
+    """Build a trainer config that passes AWM validation, with optional dotted-key overrides."""
     config = OmegaConf.create(
         {
             "algorithm": {"train_timestep_range": None, "train_timestep_count": None},
@@ -272,6 +283,7 @@ def make_trainer_config(**overrides):
     ],
 )
 def test_awm_trainer_config_validation(overrides, message):
+    """Trainer validation accepts the timestep knobs and rejects a missing old adapter or a bad window."""
     config = make_trainer_config(**overrides)
     if message is None:
         AWMLoss.validate_trainer_config(config)
@@ -313,6 +325,7 @@ def test_awm_batch_through_the_nft_engine_step():
     calls = []
 
     def module(hidden_states, encoder_hidden_states, pooled_projections, timestep, joint_attention_kwargs):
+        """Stand-in transformer: scale the latents by a trainable weight so the loss has a gradient path."""
         calls.append(timestep)
         return (weight * hidden_states + pooled_projections.mean() * 0.0,)
 
@@ -324,6 +337,7 @@ def test_awm_batch_through_the_nft_engine_step():
     seen = []
 
     def loss_function(model_output, data, dp_group):
+        """Record the engine's loss inputs and dispatch to the worker-side diffusion loss."""
         seen.append((model_output, data))
         return partial(diffusion_loss, config=make_actor())(model_output=model_output, data=data, dp_group=dp_group)
 

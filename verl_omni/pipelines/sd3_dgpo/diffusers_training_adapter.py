@@ -43,5 +43,6 @@ class StableDiffusion3DGPO(StableDiffusion3DPO):
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]],
     ) -> torch.Tensor:
+        """Run the conditional transformer pass only; CFG is never applied to the training velocity."""
         del model_config, negative_model_inputs
         return module(**model_inputs)[0]
