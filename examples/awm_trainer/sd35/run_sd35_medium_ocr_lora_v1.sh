@@ -45,7 +45,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files="$ocr_train_path" \
     data.val_files="$ocr_test_path" \
     data.train_batch_size=8 \
-    data.val_max_samples=32 \
+    data.val_max_samples=64 \
     data.max_prompt_length=512 \
     data.truncation=error \
     data.seed=42 \
@@ -124,11 +124,11 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.project_name=awm \
     trainer.experiment_name=sd35_medium_ocr_lora_v1 \
     trainer.log_val_generations=8 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT \
     trainer.nnodes=1 \
     trainer.save_freq=100 \
-    trainer.test_freq=20 \
+    trainer.test_freq=10 \
     trainer.total_epochs=15 \
     trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
     trainer.use_v1=true \
