@@ -61,37 +61,11 @@ batch sizes in the script are kept equal to the DGPO recipe for a side-by-side.
 
 ## Tested configuration
 
-### 100 steps on 1x A100 40GB (Colab Pro)
-
-- 1x NVIDIA A100-SXM4-40GB, 83GB host RAM, driver 580.82, Linux, BF16
+- 1x NVIDIA A100-SXM4-40GB (Colab Pro), driver 580.82, Linux, BF16
 - Python 3.12, torch 2.13.0+cu132, vllm 0.30.0, vllm-omni 0.30.1.dev29+g12e928001,
   diffusers 0.40.0, transformers 5.14.1
-- Everything on the one GPU: `NUM_GPUS_ACTOR_ROLLOUT=1`, the reward model colocated
-  (`reward.reward_model.enable_resource_pool=False`, `reward.models.ocr.offload=True`,
-  `reward.models.ocr.rollout.gpu_memory_utilization=0.35`, `max_num_batched_tokens=4096`,
-  `max_num_seqs=16`), rollout `engine_kwargs.vllm_omni.max_num_seqs=16`,
-  `ray_kwargs.ray_init.num_cpus=32` (Colab exposes 12 vCPUs, fewer than the actors
-  request), `RAY_memory_monitor_refresh_ms=0`, attention `native` / `TORCH_SDPA`
-- `sd35/run_sd35_medium_ocr_lora_v1.sh` for 100 steps, validating on 64 test prompts
-  every 10 steps, took 81 s per training step (rollout 25 s, reward 7 s, actor
-  update 43 s). OCR validation reward:
-
-  | step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 |
-  |---|---|---|---|---|---|---|---|---|---|---|---|
-  | reward | 0.661 | 0.798 | 0.827 | 0.876 | 0.922 | 0.874 | 0.920 | 0.865 | 0.882 | 0.886 | 0.916 |
-
-  The training-batch reward (10-step rollouts) rose from 0.73 (mean of steps 1-20) to
-  0.84 (steps 81-100). `actor/ratio_mean` stayed within 0.99-1.01, `actor/clip_frac`
-  0.2-0.5, `actor/ema_kl_loss` 5e-5 to 1.5e-3.
-
-### 20 steps on 1x L4 24GB (GCP g2-standard-16)
-
-- 1x NVIDIA L4 24GB, 62GB host RAM, driver 615.71, Linux, BF16; same Python stack
-- Reward model colocated and served in fp8
-  (`reward.models.ocr.rollout.engine_kwargs.vllm.quantization=fp8`,
-  `gpu_memory_utilization=0.4`), actor `fsdp_config.param_offload=True`, rollout
-  `engine_kwargs.vllm_omni.max_num_seqs=8`, a 32GB swapfile for host-RAM peaks
-- 180 s per training step (rollout 81 s, reward 9 s, actor update 84 s); OCR
-  validation reward 0.683 at step 0, 0.713 at step 10 and 0.799 at step 20
-
-![AWM reward curves](sd35/reward_curve.png)
+- `NUM_GPUS_ACTOR_ROLLOUT=1` with the reward model colocated on the same GPU
+  (`reward.reward_model.enable_resource_pool=False`, `reward.models.ocr.offload=True`)
+- A 100-step run of `sd35/run_sd35_medium_ocr_lora_v1.sh` in this setup, validating
+  on 64 test prompts every 10 steps, took 81 s per training step; the OCR validation
+  reward went from 0.661 at step 0 to 0.922 at step 40 and 0.916 at step 100

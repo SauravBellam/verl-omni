@@ -1523,6 +1523,7 @@ class DGPOLoss(DiffusionLossFn):
         schedule.
         """
         actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
         rollout_cfg = config.actor_rollout_ref.rollout
         n = int(rollout_cfg.n)
         micro = actor_cfg.get("ppo_micro_batch_size_per_gpu", None)
@@ -1543,12 +1544,33 @@ class DGPOLoss(DiffusionLossFn):
             problems.append(f"the {update_prompts} prompts per actor update must be divisible by dp size {dp_size}")
         if actor_cfg.get("use_dynamic_bsz", False):
             problems.append("use_dynamic_bsz must be False")
-        problems += _old_adapter_config_problems(config)
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DGPO trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
         if actor_cfg.get("enable_timestep_staging", False):
             problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
         if use_v1 and not OmegaConf.select(config, "trainer.v1.sampler.drop_incomplete_groups", default=False):
             problems.append("trainer.v1.sampler.drop_incomplete_groups must be True so groups arrive complete")
-        problems += _train_timestep_window_problems(config)
+        num_steps = OmegaConf.select(rollout_cfg, "pipeline.num_inference_steps", default=None)
+        timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
+        count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
+        if num_steps is not None:
+            num_steps = int(num_steps)
+            if timestep_range is None:
+                start, end = 0, num_steps
+            elif len(timestep_range) == 2:
+                start, end = int(timestep_range[0]), int(timestep_range[1])
+            else:
+                start, end = 0, 0
+            if not 0 <= start < end <= num_steps:
+                problems.append(f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}")
+            elif count is not None and not 1 <= int(count) <= end - start:
+                problems.append(f"train_timestep_count={count} must be between 1 and {end - start}, the range width")
         if problems:
             raise ValueError("DGPO config is not supported: " + "; ".join(problems) + ".")
 
@@ -1596,7 +1618,13 @@ class DGPOLoss(DiffusionLossFn):
     ) -> DataProto:
         """Turn ODE rollouts into DGPO actor tensors: advantages, groups, shared timesteps and noise."""
         algorithm_cfg = config.algorithm
-        timestep_key = _final_latent_rollout_timestep_key(batch, "DGPO")
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("DGPO actor batch requires `uid` in non_tensor_batch.")
+        if "latents_clean" not in batch.batch.keys():
+            raise ValueError("DGPO actor batch requires `latents_clean` from rollout.")
+        timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
+        if timestep_key is None:
+            raise ValueError("DGPO actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
 
         # Micro batches are contiguous slices, so groups must be contiguous. Rollouts usually are already
         # (prompts repeated n times in place); only then is the batch left in its original order.
@@ -1637,56 +1665,6 @@ class DGPOLoss(DiffusionLossFn):
         batch.batch["returns"] = batch.batch["advantages"]
         batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
         return batch
-
-
-def _old_adapter_config_problems(config: Any) -> list[str]:
-    """Settings the LoRA ``old``-adapter forward-process losses (DGPO, AWM) cannot run without."""
-    actor_cfg = config.actor_rollout_ref.actor
-    model_cfg = config.actor_rollout_ref.model
-    rollout_cfg = config.actor_rollout_ref.rollout
-    problems = []
-    if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
-        problems.append("actor_rollout_ref.model.lora_rank must be > 0 (this loss trains LoRA adapters)")
-    if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
-        problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
-    if rollout_cfg.get("rollout_adapter", None) != "old":
-        problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
-    if actor_cfg.get("use_kl_loss", False):
-        problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
-    return problems
-
-
-def _train_timestep_window_problems(config: Any) -> list[str]:
-    """Check ``algorithm.train_timestep_range`` / ``train_timestep_count`` against the rollout schedule."""
-    num_steps = OmegaConf.select(config, "actor_rollout_ref.rollout.pipeline.num_inference_steps", default=None)
-    timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
-    count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
-    if num_steps is None:
-        return []
-    num_steps = int(num_steps)
-    if timestep_range is None:
-        start, end = 0, num_steps
-    elif len(timestep_range) == 2:
-        start, end = int(timestep_range[0]), int(timestep_range[1])
-    else:
-        start, end = 0, 0
-    if not 0 <= start < end <= num_steps:
-        return [f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}"]
-    if count is not None and not 1 <= int(count) <= end - start:
-        return [f"train_timestep_count={count} must be between 1 and {end - start}, the range width"]
-    return []
-
-
-def _final_latent_rollout_timestep_key(batch: DataProto, loss_name: str) -> str:
-    """Check a final-latent rollout batch and return its timestep schedule key."""
-    if "uid" not in batch.non_tensor_batch:
-        raise ValueError(f"{loss_name} actor batch requires `uid` in non_tensor_batch.")
-    if "latents_clean" not in batch.batch.keys():
-        raise ValueError(f"{loss_name} actor batch requires `latents_clean` from rollout.")
-    timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
-    if timestep_key is None:
-        raise ValueError(f"{loss_name} actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
-    return timestep_key
 
 
 @register_diffusion_loss("awm")
@@ -1805,10 +1783,35 @@ class AWMLoss(DiffusionLossFn):
 
         The staged NFT engine path expects a per-step ``reward_prob`` tensor that AWM does not produce.
         """
-        problems = _old_adapter_config_problems(config)
-        if config.actor_rollout_ref.actor.get("enable_timestep_staging", False):
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        problems = []
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (AWM trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (use diffusion_loss.ref_kl_coef)")
+        if actor_cfg.get("enable_timestep_staging", False):
             problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
-        problems += _train_timestep_window_problems(config)
+        num_steps = OmegaConf.select(rollout_cfg, "pipeline.num_inference_steps", default=None)
+        timestep_range = OmegaConf.select(config, "algorithm.train_timestep_range", default=None)
+        count = OmegaConf.select(config, "algorithm.train_timestep_count", default=None)
+        if num_steps is not None:
+            num_steps = int(num_steps)
+            if timestep_range is None:
+                start, end = 0, num_steps
+            elif len(timestep_range) == 2:
+                start, end = int(timestep_range[0]), int(timestep_range[1])
+            else:
+                start, end = 0, 0
+            if not 0 <= start < end <= num_steps:
+                problems.append(f"train_timestep_range {timestep_range} must satisfy 0 <= start < end <= {num_steps}")
+            elif count is not None and not 1 <= int(count) <= end - start:
+                problems.append(f"train_timestep_count={count} must be between 1 and {end - start}, the range width")
         if problems:
             raise ValueError("AWM config is not supported: " + "; ".join(problems) + ".")
 
@@ -1820,7 +1823,13 @@ class AWMLoss(DiffusionLossFn):
     ) -> DataProto:
         """Turn ODE rollouts into AWM actor tensors: GRPO group advantages and shared training timesteps."""
         algorithm_cfg = config.algorithm
-        timestep_key = _final_latent_rollout_timestep_key(batch, "AWM")
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("AWM actor batch requires `uid` in non_tensor_batch.")
+        if "latents_clean" not in batch.batch.keys():
+            raise ValueError("AWM actor batch requires `latents_clean` from rollout.")
+        timestep_key = next((key for key in ("train_timesteps", "all_timesteps") if key in batch.batch.keys()), None)
+        if timestep_key is None:
+            raise ValueError("AWM actor batch requires `train_timesteps` or `all_timesteps` from rollout.")
         advantages, _ = compute_flow_grpo_outcome_advantage(
             reward_tensor.float().view(-1, 1),
             index=batch.non_tensor_batch["uid"],
