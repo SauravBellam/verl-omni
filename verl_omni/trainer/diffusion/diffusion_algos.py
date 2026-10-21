@@ -1516,11 +1516,12 @@ class DGPOLoss(DiffusionLossFn):
     def validate_trainer_config(config: Any) -> None:
         """Fail at trainer start on configs DGPO cannot train, instead of after the first rollout.
 
-        Each rank receives a contiguous ``batch * n / dp`` slice of the update batch and of every mini batch and
-        cuts it into contiguous micro batches, so groups stay whole only when every division is exact in units
-        of ``n``. The loss also needs the LoRA ``old`` adapter for rollout and the reference forward, complete
-        groups from the v1 sampler, the unstaged NFT engine path, and training timesteps that fit the rollout
-        schedule.
+        ``actor_rollout_ref.model.algorithm`` selects the rollout and training adapters, so it must name ``dgpo``
+        when this loss is selected. Each rank receives a contiguous ``batch * n / dp`` slice of the update batch
+        and of every mini batch and cuts it into contiguous micro batches, so groups stay whole only when every
+        division is exact in units of ``n``. The loss also needs the LoRA ``old`` adapter for rollout and the
+        reference forward, complete groups from the v1 sampler, the unstaged NFT engine path, and training
+        timesteps that fit the rollout schedule.
         """
         actor_cfg = config.actor_rollout_ref.actor
         model_cfg = config.actor_rollout_ref.model
@@ -1535,6 +1536,11 @@ class DGPOLoss(DiffusionLossFn):
             mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
             update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
         problems = []
+        if model_cfg.get("algorithm", None) != "dgpo":
+            problems.append(
+                "actor_rollout_ref.model.algorithm must be dgpo when diffusion_loss.loss_mode is dgpo, got "
+                f"{model_cfg.get('algorithm', None)}"
+            )
         if micro is None or int(micro) % n != 0:
             problems.append(f"ppo_micro_batch_size_per_gpu={micro} must be a multiple of rollout.n={n}")
         if int(actor_cfg.ppo_mini_batch_size) % dp_size != 0:
@@ -1781,12 +1787,19 @@ class AWMLoss(DiffusionLossFn):
     def validate_trainer_config(config: Any) -> None:
         """Fail at trainer start without the LoRA ``old`` adapter, with timestep staging, or a bad timestep window.
 
-        The staged NFT engine path expects a per-step ``reward_prob`` tensor that AWM does not produce.
+        ``actor_rollout_ref.model.algorithm`` selects the rollout and training adapters, so it must name ``awm``
+        when this loss is selected. The staged NFT engine path expects a per-step ``reward_prob`` tensor that
+        AWM does not produce.
         """
         actor_cfg = config.actor_rollout_ref.actor
         model_cfg = config.actor_rollout_ref.model
         rollout_cfg = config.actor_rollout_ref.rollout
         problems = []
+        if model_cfg.get("algorithm", None) != "awm":
+            problems.append(
+                "actor_rollout_ref.model.algorithm must be awm when diffusion_loss.loss_mode is awm, got "
+                f"{model_cfg.get('algorithm', None)}"
+            )
         if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
             problems.append("actor_rollout_ref.model.lora_rank must be > 0 (AWM trains LoRA adapters)")
         if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):

@@ -257,7 +257,7 @@ def make_trainer_config(**overrides):
         {
             "algorithm": {"train_timestep_range": None, "train_timestep_count": None},
             "actor_rollout_ref": {
-                "model": {"lora_rank": 32, "policy_state_adapters": ["default", "old"]},
+                "model": {"algorithm": "awm", "lora_rank": 32, "policy_state_adapters": ["default", "old"]},
                 "rollout": {"n": 8, "rollout_adapter": "old", "pipeline": {"num_inference_steps": 10}},
                 "actor": {"use_kl_loss": False, "enable_timestep_staging": False},
             },
@@ -274,6 +274,10 @@ def make_trainer_config(**overrides):
         ({}, None),
         ({"algorithm.train_timestep_range": [0, 7], "algorithm.train_timestep_count": 4}, None),
         ({"actor_rollout_ref.model.lora_rank": 0}, "lora_rank must be > 0"),
+        (
+            {"actor_rollout_ref.model.algorithm": "dgpo"},
+            "model.algorithm must be awm when diffusion_loss.loss_mode is awm",
+        ),
         ({"actor_rollout_ref.model.policy_state_adapters": ["default"]}, 'must include "old"'),
         ({"actor_rollout_ref.rollout.rollout_adapter": "default"}, "rollout_adapter must be old"),
         ({"actor_rollout_ref.actor.use_kl_loss": True}, "use_kl_loss must be False"),
@@ -290,6 +294,71 @@ def test_awm_trainer_config_validation(overrides, message):
     else:
         with pytest.raises(ValueError, match=message):
             AWMLoss.validate_trainer_config(config)
+
+
+AWM_TRAINER_OVERRIDES = [
+    "algorithm.trainer_type=direct_preference",
+    "algorithm.sample_source=online",
+    "actor_rollout_ref.model.algorithm=awm",
+    "actor_rollout_ref.actor.diffusion_loss.loss_mode=awm",
+    "actor_rollout_ref.model.lora_rank=8",
+    "actor_rollout_ref.model.policy_state_adapters=[default,old]",
+    "actor_rollout_ref.rollout.rollout_adapter=old",
+    "actor_rollout_ref.rollout.n=2",
+    "actor_rollout_ref.actor.ppo_mini_batch_size=1",
+    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2",
+    "data.train_batch_size=1",
+    "trainer.n_gpus_per_node=1",
+]
+
+
+def make_awm_v1_trainer(extra_overrides=()):
+    """Build the real v1 sync trainer from the diffusion config with the AWM overrides."""
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    import verl_omni
+    from verl_omni.trainer.diffusion.v1.trainer_sync import PolicyGradientDiffusionTrainerV1Sync
+
+    config_dir = os.path.join(os.path.dirname(os.path.abspath(verl_omni.__file__)), "trainer", "config")
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        config = compose(config_name="diffusion_trainer", overrides=AWM_TRAINER_OVERRIDES + list(extra_overrides))
+    return PolicyGradientDiffusionTrainerV1Sync(config)
+
+
+def test_v1_trainer_init_accepts_an_awm_config():
+    """The real trainer accepts AWM with the old adapter and loads the AWM loss."""
+    trainer = make_awm_v1_trainer()
+    assert trainer._is_direct_preference
+    assert trainer._has_old_adapter
+    assert isinstance(trainer._loss_fn, AWMLoss)
+
+
+@pytest.mark.parametrize(
+    "extra,message",
+    [
+        (["actor_rollout_ref.model.algorithm=dgpo"], "model.algorithm must be awm"),
+        (["actor_rollout_ref.actor.diffusion_loss.loss_mode=dgpo"], "model.algorithm must be dgpo"),
+    ],
+)
+def test_v1_trainer_init_rejects_a_mismatched_algorithm_and_loss(extra, message):
+    """A DGPO adapter with the AWM loss, or the reverse, is refused at startup rather than trained silently."""
+    with pytest.raises(ValueError, match=message):
+        make_awm_v1_trainer(extra)
+
+
+def test_awm_sd3_adapters_are_registered_under_the_awm_package():
+    """The (StableDiffusion3Pipeline, awm) pair resolves to the sd3_awm subclasses of the DGPO adapters."""
+    from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
+    from verl_omni.pipelines.sd3_awm import StableDiffusion3AWM, StableDiffusion3AWMPipeline
+    from verl_omni.pipelines.sd3_dgpo import StableDiffusion3DGPO, StableDiffusion3DGPOPipeline
+
+    assert DiffusionModelBase.peek_class("StableDiffusion3Pipeline", "awm") is StableDiffusion3AWM
+    assert issubclass(StableDiffusion3AWM, StableDiffusion3DGPO)
+    assert VllmOmniPipelineBase.get_class("StableDiffusion3Pipeline", "awm") is StableDiffusion3AWMPipeline
+    assert issubclass(StableDiffusion3AWMPipeline, StableDiffusion3DGPOPipeline)
+    assert DiffusionModelBase.peek_class("StableDiffusion3Pipeline", "dgpo") is StableDiffusion3DGPO
 
 
 def test_awm_batch_through_the_nft_engine_step():

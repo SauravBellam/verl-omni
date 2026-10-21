@@ -23,12 +23,11 @@ from verl_omni.pipelines.sd3_flow_grpo.vllm_omni_rollout_adapter import StableDi
 __all__ = ["StableDiffusion3DGPOPipeline"]
 
 
-@VllmOmniPipelineBase.register("StableDiffusion3Pipeline", algorithm="awm")
 @VllmOmniPipelineBase.register("StableDiffusion3Pipeline", algorithm="dgpo")
 class StableDiffusion3DGPOPipeline(StableDiffusion3PipelineWithLogProb):
     """Deterministic SD3.5 rollout that returns the final clean latents and the timestep schedule.
 
-    DGPO and AWM train with a forward-process objective on the final sample, so the whole
+    DGPO trains with a forward-process objective on the final sample, so the whole
     trajectory is an ODE (noise level 0) and no per-step latents or log-probabilities
     leave the pipeline.
     """
@@ -52,7 +51,6 @@ class StableDiffusion3DGPOPipeline(StableDiffusion3PipelineWithLogProb):
         generator: torch.Generator | list[torch.Generator] | None,
         logprobs: bool,
     ) -> tuple[torch.Tensor, None, None, torch.Tensor]:
-        """Run the deterministic Euler ODE and return the final clean latents with the timestep schedule."""
         del noise_level, sde_window, sde_type, logprobs
         # The parent stores fp32 latents for every step inside the window; a one-step window keeps that to two.
         latents, _, _, _ = super().diffuse(
