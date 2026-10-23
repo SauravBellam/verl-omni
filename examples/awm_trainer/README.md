@@ -6,7 +6,7 @@ This example post-trains `stabilityai/stable-diffusion-3.5-medium` with
 AWM (Advantage Weighted Matching, [paper](https://arxiv.org/abs/2509.25050))
 on the OCR task, using `vllm-omni` rollout and `Qwen/Qwen2.5-VL-3B-Instruct`
 as the OCR reward model. It mirrors the
-[DGPO example](../dgpo_trainer/README.md); the SD3.5 rollout and training adapters in
+[DGPO example](https://github.com/verl-project/verl-omni/blob/main/examples/dgpo_trainer/README.md); the SD3.5 rollout and training adapters in
 `verl_omni/pipelines/sd3_awm/` are thin subclasses of the DGPO ones.
 
 AWM is an online forward-process algorithm: rollouts stay on the deterministic
